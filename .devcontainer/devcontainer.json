@@ -1,0 +1,23 @@
+// For full details see https://containers.dev/guide/
+// and https://containers.dev/implementors/json_reference/
+{
+  "name": "Jekyll DevBox",
+  "build": {
+    "dockerfile": "./debian/13-trixie/Dockerfile",
+    "context": ".."
+  },
+  "forwardPorts": [4000, 35729],
+  "postCreateCommand": "./.devcontainer/scripts/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.shell.linux": "/bin/zsh"
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+  ],
+  "workspaceFolder": "/workspace",
+  "remoteUser": "root"
+}

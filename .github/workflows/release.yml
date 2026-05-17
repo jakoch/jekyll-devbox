@@ -1,0 +1,198 @@
+# SPDX-FileCopyrightText: 2026 Jens A. Koch
+# SPDX-License-Identifier: MIT
+# This file is part of https://github.com/jakoch/jekyll-devbox
+
+name: Release
+
+on:
+  # This workflow can be run manually.
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  schedule:
+    # Runs monthly (on the 1st at 2am)
+    - cron: "0 2 1 * *"
+
+env:
+  DOCKERHUB_IMAGE: ${{ github.repository }}
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+
+# ---------------------------------------------------------------------------------------
+
+  build:
+
+# ---------------------------------------------------------------------------------------
+
+    name: "Build Container"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: ${{ matrix.platform }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to Github Container Registry (GHCR)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker Metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=schedule,pattern={{ date 'YYYYMMDD' }}
+            type=semver,pattern={{ version }}
+            type=semver,pattern={{ major }}.{{ minor }}
+            type=raw,value={{ date 'YYYYMMDD' }}-sha-{{ sha }},enabled=${{ github.event_name == 'push' }}
+            type=raw,value=latest
+
+      - name: Build and Push by Digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .devcontainer/debian/13-trixie/Dockerfile
+          platforms: ${{ matrix.platform }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
+
+      - name: Export Digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload Digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: .devcontainer/debian/13-trixie/Dockerfile
+
+# ---------------------------------------------------------------------------------------
+
+  merge:
+
+# ---------------------------------------------------------------------------------------
+
+    name: "Merge Metadata and Push Manifest"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    needs:
+      - build
+
+    steps:
+
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Login to DockerHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to Github Container Registry (GHCR)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Docker Metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=ref,event=tag
+
+      - name: Create and Push Manifest (GHCR)
+        working-directory: /tmp/digests
+        run: |
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          sources=$(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)
+          echo "$sources"
+          docker buildx imagetools create $tags $sources
+
+      - name: Create and Push Manifest (DockerHub)
+        working-directory: /tmp/digests
+        run: |
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          sources=$(printf '${{ env.DOCKERHUB_IMAGE }}@sha256:%s ' *)
+          echo "$sources"
+          docker buildx imagetools create $tags $sources
+
+      - name: Inspect Manifest
+        run: |
+          docker buildx imagetools inspect ${{ env.GHCR_IMAGE }}:latest --raw

@@ -125,6 +125,6 @@ EXPOSE 4000
 
 # Healthcheck: verifies Jekyll is serving pages
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:4000/ || exit 1
+    CMD ["sh", "-c", "curl -f http://localhost:4000/ || exit 1"]
 
 CMD ["bash"]
